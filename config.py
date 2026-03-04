@@ -7,12 +7,12 @@ load_dotenv()
 #  🔑 CONFIGURATION — REMPLACE CES VALEURS
 # ══════════════════════════════════════════
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "TON_TOKEN_ICI")
-ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "123456789").split(",")))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8673116882:AAGS8jXfEZpkUpWhLRi1xQivvgDW32dBjmU")
+ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "8585602420").split(",")))
 
 # TON Wallet (pour recevoir les dépôts)
-TON_WALLET_ADDRESS = os.getenv("TON_WALLET", "TON_ADRESSE_WALLET_ICI")
-USDT_WALLET_ADDRESS = os.getenv("USDT_WALLET", "USDT_ADRESSE_WALLET_ICI")
+TON_WALLET_ADDRESS = os.getenv("TON_WALLET", "UQBTBzKX1VTuJg86OZFAZmT20M_YHiqyTdKH5_emMvjJe8-P")
+USDT_WALLET_ADDRESS = os.getenv("USDT_WALLET", "0xFF9969AEDd9F3B5BE6c70fd137C283cf04b65b82")
 
 # Base de données
 DB_PATH = "data/casino.db"
