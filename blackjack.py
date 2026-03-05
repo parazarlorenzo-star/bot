@@ -1,159 +1,200 @@
-import random
-import json
+import random, asyncio
+from telegram import Update
+from telegram.ext import ContextTypes
+from database import get_balance, add_balance, remove_balance
 
-DECK = []
-for suit in ["S", "H", "D", "C"]:
-    for value in ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]:
-        DECK.append(f"{value}{suit}")
+# In-memory game sessions
+GAMES = {}
 
-def create_deck(num_decks=6):
-    deck = DECK * num_decks
-    random.shuffle(deck)
-    return deck
+SUITS  = ["♠", "♥", "♦", "♣"]
+RANKS  = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"]
 
-def card_value(card: str) -> int:
-    v = card[:-1]
-    if v in ["J", "Q", "K"]:
-        return 10
-    if v == "A":
-        return 11
-    return int(v)
+SUIT_EMOJI = {"♠": "♠️", "♥": "♥️", "♦": "♦️", "♣": "♣️"}
 
-def hand_value(hand: list) -> int:
-    total = sum(card_value(c) for c in hand)
-    aces = sum(1 for c in hand if c[:-1] == "A")
+def deal():
+    return (random.choice(RANKS), random.choice(SUITS))
+
+def value(hand):
+    total = 0
+    aces  = 0
+    for r, s in hand:
+        if r in ["J","Q","K"]:
+            total += 10
+        elif r == "A":
+            total += 11
+            aces  += 1
+        else:
+            total += int(r)
     while total > 21 and aces:
         total -= 10
-        aces -= 1
+        aces  -= 1
     return total
 
-def is_blackjack(hand: list) -> bool:
-    return len(hand) == 2 and hand_value(hand) == 21
-
-def can_double(hand: list) -> bool:
-    return len(hand) == 2
-
-def can_split(hand: list) -> bool:
-    return len(hand) == 2 and card_value(hand[0]) == card_value(hand[1])
-
-def dealer_should_hit(hand: list) -> bool:
-    return hand_value(hand) < 17
-
-def new_game(bet: float) -> dict:
-    deck = create_deck()
-    player = [deck.pop(), deck.pop()]
-    dealer = [deck.pop(), deck.pop()]
-    return {
-        "player": player,
-        "dealer": dealer,
-        "deck": deck,
-        "bet": bet,
-        "status": "playing",
-        "doubled": False,
-    }
-
-def hit(state: dict) -> dict:
-    state["player"].append(state["deck"].pop())
-    if hand_value(state["player"]) > 21:
-        state["status"] = "bust"
-    return state
-
-def stand(state: dict) -> dict:
-    # Dealer plays
-    while dealer_should_hit(state["dealer"]):
-        state["dealer"].append(state["deck"].pop())
-    
-    player_v = hand_value(state["player"])
-    dealer_v = hand_value(state["dealer"])
-    
-    if dealer_v > 21 or player_v > dealer_v:
-        state["status"] = "player_win"
-    elif player_v < dealer_v:
-        state["status"] = "dealer_win"
-    else:
-        state["status"] = "push"
-    return state
-
-def double_down(state: dict) -> dict:
-    state["bet"] *= 2
-    state["doubled"] = True
-    state["player"].append(state["deck"].pop())
-    if hand_value(state["player"]) > 21:
-        state["status"] = "bust"
-    else:
-        state = stand(state)
-    return state
-
-def surrender(state: dict) -> dict:
-    state["status"] = "surrender"
-    return state
-
-def calculate_profit(state: dict) -> float:
-    bet = state["bet"]
-    status = state["status"]
-    
-    if status == "player_win":
-        if is_blackjack(state["player"]) and not state["doubled"]:
-            return bet * 1.5  # Blackjack pays 3:2
-        return bet
-    elif status == "push":
-        return 0
-    elif status == "surrender":
-        return -bet / 2
-    else:  # bust, dealer_win
-        return -bet
-
-def format_hand(hand: list, hide_second=False) -> str:
-    suits = {"S": "♠️", "H": "♥️", "D": "♦️", "C": "♣️"}
-    result = ""
-    for i, card in enumerate(hand):
-        if hide_second and i == 1:
-            result += "🂠 "
+def fmt_hand(hand, hide=False):
+    cards = []
+    for i, (r, s) in enumerate(hand):
+        if i == 1 and hide:
+            cards.append("🂠")
         else:
-            value, suit = card[:-1], card[-1]
-            result += f"{value}{suits.get(suit, suit)} "
-    return result.strip()
+            cards.append(f"[{r}{SUIT_EMOJI[s]}]")
+    return "  ".join(cards)
 
-def format_blackjack_state(state: dict, show_dealer=False) -> str:
-    player_v = hand_value(state["player"])
-    
-    if show_dealer:
-        dealer_v = hand_value(state["dealer"])
-        dealer_display = format_hand(state["dealer"])
-        dealer_score = f"({dealer_v})"
+async def cmd_blackjack(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    name = update.effective_user.first_name
+
+    if uid in GAMES:
+        return await update.message.reply_text("⚠️ You already have a game running! Use /hit or /stand.")
+
+    try:
+        bet = int(ctx.args[0])
+        assert bet > 0
+    except:
+        return await update.message.reply_text("❌ Usage: /blackjack <bet>")
+
+    bal = get_balance(uid)
+    if bal < bet:
+        return await update.message.reply_text(f"❌ Not enough chips. Balance: *{bal:,}*", parse_mode="Markdown")
+
+    remove_balance(uid, bet)
+
+    player = [deal(), deal()]
+    dealer = [deal(), deal()]
+
+    GAMES[uid] = {"bet": bet, "player": player, "dealer": dealer}
+
+    # Send card flip animation using dice emoji 🎴
+    await update.message.reply_text("🃏 *Dealing cards...*", parse_mode="Markdown")
+    await asyncio.sleep(0.5)
+
+    # Player card 1
+    d1 = await update.message.reply_dice(emoji="🎰")
+    await asyncio.sleep(0.8)
+    # Player card 2
+    d2 = await update.message.reply_dice(emoji="🎰")
+    await asyncio.sleep(1.5)
+
+    pval = value(player)
+    await update.message.reply_text(
+        f"🃏 *Blackjack*\n\n"
+        f"🏠 *Dealer:* {fmt_hand(dealer, hide=True)}  *(one card hidden)*\n\n"
+        f"👤 *Your Hand:* {fmt_hand(player)}\n"
+        f"Value: *{pval}*\n\n"
+        f"💰 Bet: *{bet:,} chips*\n\n"
+        f"👊 /hit — Draw a card\n"
+        f"🛑 /stand — Hold your hand",
+        parse_mode="Markdown"
+    )
+
+    if pval == 21:
+        await _resolve(update, uid, blackjack=True)
+
+async def cmd_hit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid not in GAMES:
+        return await update.message.reply_text("❌ No active game. Start with /blackjack <bet>")
+
+    game = GAMES[uid]
+
+    # Card flip animation
+    await update.message.reply_text("🃏 Drawing a card...")
+    flip = await update.message.reply_dice(emoji="🎰")
+    await asyncio.sleep(1.5)
+
+    new_card = deal()
+    game["player"].append(new_card)
+    pval = value(game["player"])
+
+    await update.message.reply_text(
+        f"🃏 *Your Hand:* {fmt_hand(game['player'])}\n"
+        f"Value: *{pval}*",
+        parse_mode="Markdown"
+    )
+
+    if pval > 21:
+        new_bal = get_balance(uid)
+        del GAMES[uid]
+        await update.message.reply_text(
+            f"💥 *BUST!* You went over 21.\n\n"
+            f"❌ Lost *{game['bet']:,} chips*.\n"
+            f"Balance: *{new_bal:,} chips*",
+            parse_mode="Markdown"
+        )
+    elif pval == 21:
+        await _resolve(update, uid)
     else:
-        dealer_display = format_hand(state["dealer"], hide_second=True)
-        dealer_score = f"({card_value(state['dealer'][0])}+?)"
-    
-    player_display = format_hand(state["player"])
-    
-    status_map = {
-        "player_win": "🏆 GAGNÉ!",
-        "dealer_win": "❌ PERDU!",
-        "bust": "💥 BUST!",
-        "push": "🤝 ÉGALITÉ",
-        "surrender": "🏳️ ABANDONNÉ",
-        "playing": "🃏 Ton tour...",
-    }
-    
-    msg = f"""
-🃏 *BLACKJACK*
+        await update.message.reply_text("👊 /hit — Draw again\n🛑 /stand — Hold")
 
-🏦 Croupier: {dealer_display} {dealer_score}
+async def cmd_stand(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid not in GAMES:
+        return await update.message.reply_text("❌ No active game. Start with /blackjack <bet>")
+    await _resolve(update, uid)
 
-👤 Toi: {player_display} *({player_v})*
+async def _resolve(update, uid, blackjack=False):
+    game   = GAMES[uid]
+    player = game["player"]
+    dealer = game["dealer"]
+    bet    = game["bet"]
 
-💰 Mise: `${state['bet']:.2f} USDT`
-"""
-    
-    if state["status"] != "playing":
-        profit = calculate_profit(state)
-        msg += f"\n{status_map.get(state['status'], '')}"
-        if profit > 0:
-            msg += f"\n📈 Gain: *+${profit:.2f}*"
-        elif profit < 0:
-            msg += f"\n📉 Perdu: *${profit:.2f}*"
-        else:
-            msg += f"\n↩️ Mise remboursée"
-    
-    return msg
+    await update.message.reply_text("🏠 *Dealer reveals their hand...*", parse_mode="Markdown")
+
+    # Dealer card reveal animation
+    flip = await update.message.reply_dice(emoji="🎰")
+    await asyncio.sleep(1.5)
+
+    while value(dealer) < 17:
+        await update.message.reply_text("🏠 Dealer draws...")
+        await update.message.reply_dice(emoji="🎰")
+        await asyncio.sleep(1.5)
+        dealer.append(deal())
+
+    pval = value(player)
+    dval = value(dealer)
+
+    dealer_txt = fmt_hand(dealer)
+    player_txt = fmt_hand(player)
+
+    if blackjack or pval == 21 and dval != 21:
+        win = int(bet * 1.5)
+        add_balance(uid, bet + win)
+        new_bal = get_balance(uid)
+        result = (
+            f"🃏 *BLACKJACK!* 🎉\n\n"
+            f"🏠 Dealer: {dealer_txt} (*{dval}*)\n"
+            f"👤 You:    {player_txt} (*{pval}*)\n\n"
+            f"✅ Won *+{win:,} chips* (1.5x)!\n"
+            f"Balance: *{new_bal:,} chips*"
+        )
+    elif dval > 21 or pval > dval:
+        add_balance(uid, bet * 2)
+        new_bal = get_balance(uid)
+        result = (
+            f"🃏 *You WIN!* 🎉\n\n"
+            f"🏠 Dealer: {dealer_txt} (*{dval}*)\n"
+            f"👤 You:    {player_txt} (*{pval}*)\n\n"
+            f"✅ Won *+{bet:,} chips*!\n"
+            f"Balance: *{new_bal:,} chips*"
+        )
+    elif pval == dval:
+        add_balance(uid, bet)
+        new_bal = get_balance(uid)
+        result = (
+            f"🃏 *PUSH — Tie!* 🤝\n\n"
+            f"🏠 Dealer: {dealer_txt} (*{dval}*)\n"
+            f"👤 You:    {player_txt} (*{pval}*)\n\n"
+            f"↩️ Bet returned.\n"
+            f"Balance: *{new_bal:,} chips*"
+        )
+    else:
+        new_bal = get_balance(uid)
+        result = (
+            f"🃏 *You Lost* 😢\n\n"
+            f"🏠 Dealer: {dealer_txt} (*{dval}*)\n"
+            f"👤 You:    {player_txt} (*{pval}*)\n\n"
+            f"❌ Lost *{bet:,} chips*.\n"
+            f"Balance: *{new_bal:,} chips*"
+        )
+
+    del GAMES[uid]
+    await update.message.reply_text(result, parse_mode="Markdown")
